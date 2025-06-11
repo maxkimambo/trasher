@@ -3,8 +3,20 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"github.com/spf13/cobra"
+
+	"github.com/maxkimambo/trasher/internal/checksum"
+	"github.com/maxkimambo/trasher/internal/progress"
+	"github.com/maxkimambo/trasher/internal/signal"
+	"github.com/maxkimambo/trasher/internal/validation"
+	"github.com/maxkimambo/trasher/internal/worker"
+	"github.com/maxkimambo/trasher/internal/writer"
+	"github.com/maxkimambo/trasher/pkg/generator"
+	"github.com/maxkimambo/trasher/pkg/sizeparser"
 )
 
 var (
@@ -25,36 +37,171 @@ var rootCmd = &cobra.Command{
 with configurable data patterns using concurrent workers for optimal performance.`,
 	Version: version,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if verbose {
-			fmt.Println("Running trasher with verbose output")
-		}
+		return runTrasher()
+	},
+}
 
-		// Validate required flags
-		if size == "" {
-			return fmt.Errorf("--size flag is required")
-		}
-		if output == "" {
-			return fmt.Errorf("--output flag is required")
-		}
+func runTrasher() error {
+	// Create validation configuration
+	config := validation.ValidationConfig{
+		Size:       size,
+		Pattern:    pattern,
+		OutputPath: output,
+		Workers:    workers,
+		ChunkSize:  chunkSize,
+		Force:      force,
+	}
 
-		// Check if output file exists and force flag is not set
-		if !force {
-			if _, err := os.Stat(output); err == nil {
-				return fmt.Errorf("output file %s already exists, use --force to overwrite", output)
-			}
-		}
+	// Run pre-flight validation
+	validator := validation.NewValidator()
+	if err := validator.ValidateAll(config); err != nil {
+		return fmt.Errorf("validation failed: %v", err)
+	}
 
+	// Parse size and chunk size
+	sizeBytes, err := sizeparser.Parse(size)
+	if err != nil {
+		return fmt.Errorf("failed to parse size: %v", err)
+	}
+
+	chunkSizeBytes, err := sizeparser.Parse(chunkSize)
+	if err != nil {
+		return fmt.Errorf("failed to parse chunk size: %v", err)
+	}
+
+	if verbose {
 		fmt.Printf("Generating file: %s\n", output)
-		fmt.Printf("Size: %s\n", size)
+		fmt.Printf("Size: %s (%d bytes)\n", size, sizeBytes)
 		fmt.Printf("Pattern: %s\n", pattern)
 		fmt.Printf("Workers: %d\n", workers)
-		fmt.Printf("Chunk size: %s\n", chunkSize)
+		fmt.Printf("Chunk size: %s (%d bytes)\n", chunkSize, chunkSizeBytes)
+		fmt.Println()
+	}
 
-		// TODO: Implement actual file generation logic
-		fmt.Println("File generation logic will be implemented in subsequent tasks")
+	// Create context and shutdown handler
+	ctx, shutdownHandler := signal.WithShutdownHandler(os.Stdout)
 
-		return nil
-	},
+	// Create file writer
+	fileWriter, err := writer.NewFileWriter(output, sizeBytes, force)
+	if err != nil {
+		return fmt.Errorf("failed to create file writer: %v", err)
+	}
+
+	// Register cleanup for file writer
+	shutdownHandler.RegisterCleanupFunc(func() error {
+		return fileWriter.Close()
+	})
+
+	// Set writer in shutdown handler for progress reporting
+	shutdownHandler.SetWriter(fileWriter)
+
+	// Create progress reporter
+	progressReporter := progress.NewProgressReporter(sizeBytes, verbose, os.Stdout)
+	shutdownHandler.SetProgressReporter(progressReporter)
+
+	// Create pattern generator
+	gen, err := generator.NewGenerator(pattern)
+	if err != nil {
+		return fmt.Errorf("failed to create generator: %v", err)
+	}
+
+	// Create checksum generator
+	checksumGen := checksum.NewChecksumGenerator(output, sizeBytes)
+
+	// Create worker pool
+	workerPool := worker.NewWorkerPool(ctx, workers, chunkSizeBytes)
+
+	// Start progress reporting
+	var writtenBytes int64
+	getWritten := func() int64 {
+		return atomic.LoadInt64(&writtenBytes)
+	}
+	progressReporter.Start(getWritten)
+
+	// Start worker pool
+	workerPool.Start(gen, sizeBytes)
+
+	// Process results
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case err := <-workerPool.Errors():
+				if err != nil {
+					fmt.Printf("\nError: %v\n", err)
+					shutdownHandler.Stop()
+					return
+				}
+			case result, ok := <-workerPool.Results():
+				if !ok {
+					// Channel closed, all work completed
+					return
+				}
+
+				// Update checksum
+				if err := checksumGen.UpdateWithChunk(result.Buffer, result.Offset); err != nil {
+					fmt.Printf("\nChecksum error: %v\n", err)
+					shutdownHandler.Stop()
+					workerPool.ReturnBuffer(result.Buffer)
+					return
+				}
+
+				// Write to file
+				if err := fileWriter.WriteAt(result.Buffer, result.Offset); err != nil {
+					fmt.Printf("\nFile write error: %v\n", err)
+					shutdownHandler.Stop()
+					workerPool.ReturnBuffer(result.Buffer)
+					return
+				}
+
+				// Update written bytes counter
+				atomic.AddInt64(&writtenBytes, int64(len(result.Buffer)))
+
+				// Return buffer to pool
+				workerPool.ReturnBuffer(result.Buffer)
+			}
+		}
+	}()
+
+	// Wait for all work to complete or cancellation
+	wg.Wait()
+	workerPool.Wait()
+
+	// Stop progress reporting
+	progressReporter.Stop()
+
+	// Check if operation was cancelled
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
+		// Operation completed successfully
+	}
+
+	// Close file writer
+	if err := fileWriter.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %v", err)
+	}
+
+	// Write checksum file
+	if err := checksumGen.WriteChecksumFile(); err != nil {
+		return fmt.Errorf("failed to write checksum file: %v", err)
+	}
+
+	if verbose {
+		fmt.Printf("\nFile generation completed successfully!\n")
+		fmt.Printf("Output file: %s\n", output)
+		fmt.Printf("Checksum file: %s.checksum.txt\n", output)
+	} else {
+		fmt.Printf("Successfully generated %s\n", output)
+	}
+
+	return nil
 }
 
 func Execute() {
@@ -66,10 +213,10 @@ func Execute() {
 
 func init() {
 	rootCmd.Flags().StringVarP(&size, "size", "s", "", "Size of file to generate (required)")
-	rootCmd.Flags().StringVarP(&pattern, "pattern", "p", "random", "Data pattern to generate (random, zeros, ones, custom)")
+	rootCmd.Flags().StringVarP(&pattern, "pattern", "p", "random", "Data pattern to generate (random, sequential, zero, mixed)")
 	rootCmd.Flags().StringVarP(&output, "output", "o", "", "Output file path (required)")
-	rootCmd.Flags().IntVarP(&workers, "workers", "w", 4, "Number of worker goroutines")
-	rootCmd.Flags().StringVarP(&chunkSize, "chunk-size", "c", "1MB", "Size of data chunks per worker")
+	rootCmd.Flags().IntVarP(&workers, "workers", "w", runtime.NumCPU(), "Number of worker goroutines")
+	rootCmd.Flags().StringVarP(&chunkSize, "chunk-size", "c", "64MB", "Size of data chunks per worker")
 	rootCmd.Flags().BoolVarP(&force, "force", "f", false, "Overwrite existing files without confirmation")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
 

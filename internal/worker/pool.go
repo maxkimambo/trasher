@@ -13,7 +13,7 @@ type WorkerPool struct {
 	numWorkers int
 	chunkSize  int64
 	workChan   chan workItem
-	resultChan chan resultItem
+	resultChan chan ResultItem
 	errorChan  chan error
 	wg         sync.WaitGroup
 	ctx        context.Context
@@ -27,10 +27,10 @@ type workItem struct {
 	size   int64
 }
 
-// resultItem represents the result of processed work.
-type resultItem struct {
-	buffer []byte
-	offset int64
+// ResultItem represents the result of processed work.
+type ResultItem struct {
+	Buffer []byte
+	Offset int64
 }
 
 // NewWorkerPool creates a new worker pool with the specified configuration.
@@ -50,7 +50,7 @@ func NewWorkerPool(ctx context.Context, numWorkers int, chunkSize int64) *Worker
 		numWorkers: numWorkers,
 		chunkSize:  chunkSize,
 		workChan:   make(chan workItem, numWorkers*2),
-		resultChan: make(chan resultItem, numWorkers*2),
+		resultChan: make(chan ResultItem, numWorkers*2),
 		errorChan:  make(chan error, numWorkers),
 		ctx:        ctx,
 		cancel:     cancel,
@@ -117,7 +117,7 @@ func (p *WorkerPool) worker(gen generator.Generator) {
 			case <-p.ctx.Done():
 				p.bufferPool.Put(bufferPtr)
 				return
-			case p.resultChan <- resultItem{buffer: buffer, offset: work.offset}:
+			case p.resultChan <- ResultItem{Buffer: buffer, Offset: work.offset}:
 				// Buffer will be returned to pool after processing
 			}
 		}
@@ -145,7 +145,7 @@ func (p *WorkerPool) distributeWork(totalSize int64) {
 }
 
 // Results returns the result channel for reading processed chunks.
-func (p *WorkerPool) Results() <-chan resultItem {
+func (p *WorkerPool) Results() <-chan ResultItem {
 	return p.resultChan
 }
 
