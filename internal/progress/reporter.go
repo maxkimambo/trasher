@@ -102,9 +102,9 @@ func (p *ProgressReporter) update(written int64) {
 		throughput = float64(bytesWrittenSinceLast) / sinceLast.Seconds()
 	}
 
-	// Calculate ETA
+	// Calculate ETA using recent throughput for better responsiveness
 	var eta time.Duration
-	if throughput > 0 && written < p.totalSize {
+	if written > 0 && written < p.totalSize && throughput > 0 {
 		remainingBytes := p.totalSize - written
 		eta = time.Duration(float64(remainingBytes)/throughput) * time.Second
 	}
@@ -171,7 +171,12 @@ func (p *ProgressReporter) Stop() {
 	}
 
 	p.running = false
-	close(p.done)
+	select {
+	case <-p.done:
+		// Already closed
+	default:
+		close(p.done)
+	}
 }
 
 // printFinalStats prints the final completion statistics.

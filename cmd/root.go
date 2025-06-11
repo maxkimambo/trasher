@@ -131,12 +131,6 @@ func runTrasher() error {
 			select {
 			case <-ctx.Done():
 				return
-			case err := <-workerPool.Errors():
-				if err != nil {
-					fmt.Printf("\nError: %v\n", err)
-					shutdownHandler.Stop()
-					return
-				}
 			case result, ok := <-workerPool.Results():
 				if !ok {
 					// Channel closed, all work completed
@@ -168,11 +162,32 @@ func runTrasher() error {
 		}
 	}()
 
-	// Wait for all work to complete or cancellation
-	wg.Wait()
-	workerPool.Wait()
+	// Monitor for errors in a separate goroutine
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case err, ok := <-workerPool.Errors():
+				if !ok {
+					// Error channel closed, work completed
+					return
+				}
+				if err != nil {
+					fmt.Printf("\nError: %v\n", err)
+					shutdownHandler.Stop()
+					return
+				}
+			}
+		}
+	}()
 
-	// Stop progress reporting
+	// Wait for workers to complete, then close channels
+	workerPool.Wait()
+	// Wait for result processing to complete
+	wg.Wait()
+
+	// Stop progress reporting immediately after work completion
 	progressReporter.Stop()
 
 	// Check if operation was cancelled
