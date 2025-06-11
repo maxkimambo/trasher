@@ -59,9 +59,9 @@ func TestWorkerPoolBasicOperation(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for result := range p.Results() {
-			results[result.offset] = make([]byte, len(result.buffer))
-			copy(results[result.offset], result.buffer)
-			p.ReturnBuffer(result.buffer)
+			results[result.Offset] = make([]byte, len(result.Buffer))
+			copy(results[result.Offset], result.Buffer)
+			p.ReturnBuffer(result.Buffer)
 		}
 	}()
 
@@ -120,7 +120,7 @@ func TestWorkerPoolWithDifferentGenerators(t *testing.T) {
 				defer wg.Done()
 				for result := range p.Results() {
 					resultCount++
-					p.ReturnBuffer(result.buffer)
+					p.ReturnBuffer(result.Buffer)
 				}
 			}()
 
@@ -176,7 +176,7 @@ func TestWorkerPoolGracefulShutdown(t *testing.T) {
 	done := make(chan bool)
 	go func() {
 		for result := range p.Results() {
-			p.ReturnBuffer(result.buffer)
+			p.ReturnBuffer(result.Buffer)
 		}
 		done <- true
 	}()
@@ -209,7 +209,7 @@ func TestWorkerPoolContextCancellation(t *testing.T) {
 		defer close(done)
 		for result := range p.Results() {
 			resultCount++
-			p.ReturnBuffer(result.buffer)
+			p.ReturnBuffer(result.Buffer)
 		}
 	}()
 
@@ -244,8 +244,8 @@ func TestWorkerPoolBufferReuse(t *testing.T) {
 		defer wg.Done()
 		for result := range p.Results() {
 			// Store the buffer pointer for comparison
-			buffers = append(buffers, &result.buffer)
-			p.ReturnBuffer(result.buffer)
+			buffers = append(buffers, &result.Buffer)
+			p.ReturnBuffer(result.Buffer)
 		}
 	}()
 
@@ -273,8 +273,8 @@ func TestWorkerPoolLastChunkSize(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for result := range p.Results() {
-			results[result.offset] = len(result.buffer)
-			p.ReturnBuffer(result.buffer)
+			results[result.Offset] = len(result.Buffer)
+			p.ReturnBuffer(result.Buffer)
 		}
 	}()
 
@@ -318,7 +318,7 @@ func TestWorkerPoolConcurrency(t *testing.T) {
 		defer wg.Done()
 		for result := range p.Results() {
 			processedCount++
-			p.ReturnBuffer(result.buffer)
+			p.ReturnBuffer(result.Buffer)
 		}
 	}()
 
@@ -368,7 +368,7 @@ func BenchmarkWorkerPool(b *testing.B) {
 				var count int
 				for result := range p.Results() {
 					count++
-					p.ReturnBuffer(result.buffer)
+					p.ReturnBuffer(result.Buffer)
 				}
 
 				p.Wait()
