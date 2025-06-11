@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"syscall"
 
 	"github.com/maxkimambo/trasher/pkg/generator"
 	"github.com/maxkimambo/trasher/pkg/sizeparser"
@@ -201,17 +200,13 @@ func (v *Validator) validateDirectory(dir string) error {
 
 // ValidateDiskSpace checks if there's sufficient disk space for the file.
 func (v *Validator) ValidateDiskSpace(path string, size int64) error {
-	dir := filepath.Dir(path)
-
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dir, &stat); err != nil {
+	available, total, err := getDiskSpaceInfo(path)
+	if err != nil {
 		return &ValidationError{
 			Field:   "disk_space",
 			Message: fmt.Sprintf("failed to check disk space: %v", err),
 		}
 	}
-
-	available := int64(stat.Bavail) * int64(stat.Bsize)
 	if size > available {
 		return &ValidationError{
 			Field:   "disk_space",
@@ -221,7 +216,6 @@ func (v *Validator) ValidateDiskSpace(path string, size int64) error {
 	}
 
 	// Warn if less than 10% free space will remain
-	total := int64(stat.Blocks) * int64(stat.Bsize)
 	remaining := available - size
 	if remaining < total/10 {
 		// This is a warning, not an error, so we don't return it
@@ -233,10 +227,8 @@ func (v *Validator) ValidateDiskSpace(path string, size int64) error {
 
 // ValidateFileSystemCapabilities checks file system limitations.
 func (v *Validator) ValidateFileSystemCapabilities(path string, size int64) error {
-	dir := filepath.Dir(path)
-
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dir, &stat); err != nil {
+	_, _, err := getDiskSpaceInfo(path)
+	if err != nil {
 		return &ValidationError{
 			Field:   "filesystem",
 			Message: fmt.Sprintf("failed to check file system: %v", err),
@@ -366,16 +358,14 @@ func ValidateConfiguration(size, pattern, outputPath string, workers int, chunkS
 
 // GetSystemInfo returns information about the system capabilities.
 func GetSystemInfo(path string) (*SystemInfo, error) {
-	dir := filepath.Dir(path)
-	
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dir, &stat); err != nil {
+	available, total, err := getDiskSpaceInfo(path)
+	if err != nil {
 		return nil, fmt.Errorf("failed to get system info: %v", err)
 	}
 
 	return &SystemInfo{
-		AvailableSpace: int64(stat.Bavail) * int64(stat.Bsize),
-		TotalSpace:     int64(stat.Blocks) * int64(stat.Bsize),
+		AvailableSpace: available,
+		TotalSpace:     total,
 		CPUCount:       runtime.NumCPU(),
 		MaxWorkers:     runtime.NumCPU() * 4,
 	}, nil
